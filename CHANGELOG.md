@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## 0.4.0 - 2026-08-27
+
+### Changed
+
+- Replaced the unsuccessful `deal_score → list_score` compatibility mapping with client-side reconstruction using AllKeyShop's existing `offers[].deal_score` values.
+- Candidate acquisition now uses neutral `id` ordering instead of `price asc`.
+- Removed the silent Cheapest Games fallback; reconstruction errors are now surfaced explicitly.
+- Updated project architecture, tests, and documentation around the verified API behavior.
+
+### Added
+
+- Adaptive `deal_score_min` threshold probing to keep the candidate pool bounded.
+- Local de-duplication and descending deal-score ordering.
+- Synthetic `CatalogV2` responses so AllKeyShop's existing catalogue UI can render reconstructed results.
+- Tests for request matching, filter preservation, score extraction, de-duplication, and ranking.
+
 ## 0.3.1 - 2026-08-27
 
 ### Changed
@@ -23,4 +39,4 @@ All notable changes to this project are documented here.
 ### Added
 
 - Initial compatibility patch for AllKeyShop catalogue `fetch` requests.
-- Rewrite from obsolete `sort_field=deal_score` to supported `sort_field=list_score`.
+- Experimental rewrite from obsolete `sort_field=deal_score` to `sort_field=list_score`.

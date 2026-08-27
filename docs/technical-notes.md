@@ -2,9 +2,7 @@
 
 ## Incident summary
 
-The AllKeyShop catalogue remained functional under normal sorts such as **Cheapest games**, but switching to **Best deals** returned an empty result state.
-
-The browser network trace showed that both requests target the same `CatalogV2` endpoint with the same catalogue filters. The material difference is the sort field.
+AllKeyShop's catalogue continued to work under normal sorts such as **Cheapest Games**, while **Best Deals** returned an empty state under otherwise identical filters.
 
 ### Working request
 
@@ -15,71 +13,66 @@ sort_order=asc
 
 Response: HTTP 200.
 
-### Failing request
+### Broken request
 
 ```text
 sort_field=deal_score
 sort_order=desc
 ```
 
-Response: HTTP 400.
+Response: HTTP 400. The API reports `deal_score` as an unsupported server-side sort field.
 
-The API validation message reports `deal_score` as invalid and advertises these supported sort fields:
+The validation response advertised `list_score` as supported, so an initial compatibility patch translated `deal_score` to `list_score`. Live testing showed that the resulting catalogue request returned HTTP 404 even with `type=game`, so that mapping was discarded rather than treated as a successful fix.
+
+## Remaining API capability
+
+Valid `CatalogV2` responses still expose offer-level fields including:
 
 ```text
-id
-list_score
-name
-popularity_score
-price
-random
-rating
-release_date
-relevance
+offers.price
+offers.deal_score
+offers.official_offer_reduction_percent
 ```
 
-That makes the failure an API-contract regression rather than a catalogue-filtering problem.
+The catalogue request also accepts:
 
-## Why intercept `fetch`?
+```text
+deal_score_min
+deal_score_max
+```
 
-There are several possible ways to work around the regression:
+This leaves enough of the original ranking contract intact to reconstruct the missing sort on the client.
 
-1. scrape and re-render catalogue cards;
-2. call the API independently and build a parallel UI;
-3. intercept the broken request and repair the obsolete parameter.
+## Why not sort candidates by price?
 
-The third option has the smallest maintenance surface. AllKeyShop continues to own rendering, pagination, filters, localization, and navigation. The userscript changes one request field immediately before the application's normal network call.
+A previous experimental implementation fetched candidate records with `sort_field=price&sort_order=asc`. That creates an avoidable sampling bias toward cheap products, and its error path also fell back to price sorting. The result could therefore look exactly like **Cheapest Games** even when Best Deals reconstruction had failed.
 
-## Matching rules
+Version 0.4 removes both behaviors:
 
-A request is rewritten only when all of the following are true:
+- candidate acquisition uses the supported, neutral `id` sort;
+- reconstruction failures are surfaced instead of silently returning price-sorted data.
 
-- host is `www.allkeyshop.com`;
-- path matches `/api/<version>/vakrs_catalogv2.php`;
-- `action=CatalogV2`;
-- `sort_field=deal_score`.
+## Reconstruction algorithm
 
-Everything else returns `null` from the pure transformer and flows through the native `fetch` implementation.
+1. Intercept the frontend request only when it targets AllKeyShop's `CatalogV2` endpoint and requests `sort_field=deal_score`.
+2. Preserve all active catalogue filters from the original URL.
+3. Binary-search `deal_score_min` between 0 and 1 to find the highest threshold that still leaves a useful candidate pool.
+4. Fetch the bounded candidate pages using `sort_field=id`.
+5. Compute each catalogue item's score as the maximum finite `offers[].deal_score` value across its products.
+6. De-duplicate merged items using the API merge key when available.
+7. Sort descending by the returned deal score.
+8. Slice the requested page and return a synthetic JSON `Response` matching the catalogue's expected shape.
 
-## Why `list_score`?
+## Failure behavior
 
-The API itself reports `list_score` as supported after rejecting `deal_score`, making it the strongest server-side compatibility candidate visible from the failing request.
+The script deliberately does not fall back to `price asc`. Returning an unrelated sort under the **Best Deals** label is worse than exposing a diagnosable failure.
 
-This is intentionally treated as a compatibility hypothesis rather than proof that both fields have identical ranking semantics.
+During threshold probing, HTTP 404 is interpreted as an empty result set because the catalogue endpoint can use 404 for filtered queries with no matches. Other non-success statuses remain fatal.
 
-## Fallback design
+## Bounded network behavior
 
-The catalogue response still exposes offer-level fields including `offers[].deal_score`. If `list_score` does not reproduce the intended ranking, a future version can:
-
-1. request valid catalogue pages using supported sorting;
-2. retain the user's active filters, locale, currency, and activation country;
-3. read returned offer-level deal scores;
-4. compute one comparable score per product;
-5. sort the collected result set client-side;
-6. render or inject the ordered results without depending on the removed server-side sort field.
-
-That path is more invasive and should only be used if the narrow compatibility mapping is insufficient.
+The full catalogue is large, so the script does not crawl every page. It uses a target candidate pool, a fixed number of threshold probes, a maximum page count, and bounded concurrency. This concentrates requests on the highest-scoring slice of the catalogue while keeping the workaround practical for an interactive page.
 
 ## Non-goals
 
-This project does not attempt to bypass authentication, purchase restrictions, merchant redirects, regional controls, or pricing logic. It only restores a broken catalogue sort request.
+The project does not bypass authentication, merchant redirects, regional controls, purchase restrictions, or pricing logic. It reconstructs one broken catalogue ordering from values already returned by the site's own API.

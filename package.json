@@ -1,8 +1,8 @@
 {
   "name": "allkeyshop-best-deals-fix",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
-  "description": "A focused userscript compatibility shim for AllKeyShop's broken Best deals catalogue sort.",
+  "description": "A userscript that reconstructs AllKeyShop's broken Best Deals catalogue sort from its existing deal-score data.",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
