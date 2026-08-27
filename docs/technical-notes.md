@@ -22,57 +22,70 @@ sort_order=desc
 
 Response: HTTP 400. The API reports `deal_score` as an unsupported server-side sort field.
 
-The validation response advertised `list_score` as supported, so an initial compatibility patch translated `deal_score` to `list_score`. Live testing showed that the resulting catalogue request returned HTTP 404 even with `type=game`, so that mapping was discarded rather than treated as a successful fix.
+The validation response advertised `list_score` as supported, but live testing showed `sort_field=list_score` returns HTTP 404 for the same Games catalogue request, both with and without the obsolete deal-score filters.
 
-## Remaining API capability
+## Why version 0.4 was insufficient
 
-Valid `CatalogV2` responses still expose offer-level fields including:
+Version 0.4 attempted to retain AllKeyShop's native ranking signal by reading `offers[].deal_score` and using `deal_score_min/max` to concentrate the candidate set. Live results showed that this did not recreate Best Deals: the output followed neutral catalogue/ID ordering rather than deal quality, indicating that the remaining deal-score values/filter behavior are not sufficient to reproduce the historical sort.
+
+## Version 0.5 ranking model
+
+Valid responses still expose:
 
 ```text
 offers.price
-offers.deal_score
+offers.stock_status
 offers.official_offer_reduction_percent
 ```
 
-The catalogue request also accepts:
+The local scorer therefore reconstructs the behavior from those fields.
+
+For an offer with current price `P` and reduction `D` in the range `(0, 1)`:
 
 ```text
-deal_score_min
-deal_score_max
+referencePrice = P / (1 - D)
+score = D² × log2(referencePrice + 1)
 ```
 
-This leaves enough of the original ranking contract intact to reconstruct the missing sort on the client.
+The squared discount term makes percentage reduction the dominant factor. The logarithmic reference-price term differentiates, for example, a 90% reduction on a premium title from the same reduction on a $5 title without allowing MSRP alone to overwhelm the ranking.
 
-## Why not sort candidates by price?
+Free, undiscounted, invalid, and explicitly out-of-stock offers are excluded.
 
-A previous experimental implementation fetched candidate records with `sort_field=price&sort_order=asc`. That creates an avoidable sampling bias toward cheap products, and its error path also fell back to price sorting. The result could therefore look exactly like **Cheapest Games** even when Best Deals reconstruction had failed.
+## Candidate sampling
 
-Version 0.4 removes both behaviors:
+A complete crawl of the active Games catalogue would require thousands of pages. Version 0.5 uses bounded, multi-strategy sampling instead.
 
-- candidate acquisition uses the supported, neutral `id` sort;
-- reconstruction failures are surfaced instead of silently returning price-sorted data.
+### Price-distribution sample
 
-## Reconstruction algorithm
+The first twelve `price asc` pages are always included. Additional pages are chosen with geometric spacing from page 1 to the active catalogue's final page. This gives dense coverage to low prices while still sampling medium and high current-price regions.
 
-1. Intercept the frontend request only when it targets AllKeyShop's `CatalogV2` endpoint and requests `sort_field=deal_score`.
-2. Preserve all active catalogue filters from the original URL.
-3. Binary-search `deal_score_min` between 0 and 1 to find the highest threshold that still leaves a useful candidate pool.
-4. Fetch the bounded candidate pages using `sort_field=id`.
-5. Compute each catalogue item's score as the maximum finite `offers[].deal_score` value across its products.
-6. De-duplicate merged items using the API merge key when available.
-7. Sort descending by the returned deal score.
-8. Slice the requested page and return a synthetic JSON `Response` matching the catalogue's expected shape.
+### Secondary samples
+
+The script also collects bounded leading pages from:
+
+```text
+popularity_score desc
+rating desc
+release_date desc
+random
+```
+
+These samples reduce the chance that a strong deal is missed simply because its current price places it far from the beginning of the price-sorted catalogue.
+
+All candidate requests preserve the user's active filters and remove the obsolete `deal_score_min/max` parameters.
+
+## Synthetic response
+
+Candidate items are de-duplicated by API merge key when available. Each item's strongest in-stock offer is scored, items are sorted locally, and the requested slice is returned as a synthetic JSON `Response` in the normal `CatalogV2` shape. The native catalogue UI therefore continues to render the cards, pagination controls, merchant information, and links.
+
+## Cache and request bounds
+
+The reconstructed ranking is cached for five minutes per filter state. Candidate requests are executed with bounded concurrency. Changing a catalogue filter creates a different cache key and therefore a fresh ranking.
 
 ## Failure behavior
 
-The script deliberately does not fall back to `price asc`. Returning an unrelated sort under the **Best Deals** label is worse than exposing a diagnosable failure.
-
-During threshold probing, HTTP 404 is interpreted as an empty result set because the catalogue endpoint can use 404 for filtered queries with no matches. Other non-success statuses remain fatal.
-
-## Bounded network behavior
-
-The full catalogue is large, so the script does not crawl every page. It uses a target candidate pool, a fixed number of threshold probes, a maximum page count, and bounded concurrency. This concentrates requests on the highest-scoring slice of the catalogue while keeping the workaround practical for an interactive page.
+The script deliberately does not fall back to `price asc`. Returning an unrelated sort under the **Best Deals** label makes a failure look successful and obscures debugging evidence.
 
 ## Non-goals
 
-The project does not bypass authentication, merchant redirects, regional controls, purchase restrictions, or pricing logic. It reconstructs one broken catalogue ordering from values already returned by the site's own API.
+The project does not bypass authentication, merchant redirects, regional controls, purchase restrictions, or pricing logic. It reconstructs one broken catalogue ordering from public values already returned to the browser.

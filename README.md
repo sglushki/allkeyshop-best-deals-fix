@@ -1,6 +1,6 @@
 # AllKeyShop Best Deals Fix
 
-A browser userscript that reconstructs AllKeyShop's broken **Best Deals** catalogue sort from deal-score data the site still returns.
+A browser userscript that reconstructs AllKeyShop's broken **Best Deals** catalogue view from the live price and official-discount data that the site still returns.
 
 ![Broken Best Deals catalogue state](docs/assets/best-deals-broken.png)
 
@@ -8,39 +8,45 @@ A browser userscript that reconstructs AllKeyShop's broken **Best Deals** catalo
 
 This project began as a production-debugging exercise. The catalogue worked under normal sort modes, but **Best Deals** consistently returned an empty state. Network inspection isolated the failure to an API-contract regression: the frontend still requests `sort_field=deal_score`, while the current `CatalogV2` endpoint no longer accepts that field for server-side sorting.
 
-A first compatibility hypothesis mapped the removed field to the API-advertised `list_score`, but live testing showed that request also failed. The current implementation therefore reconstructs the missing behavior client-side instead of substituting an unrelated sort.
+Two server-side compatibility paths were tested and rejected:
 
-## Root cause
+- `deal_score` itself returns HTTP 400 as an unsupported sort field;
+- the API-advertised `list_score` returns HTTP 404 for this catalogue request;
+- offer-level `deal_score` values are still present but do not produce a useful historical Best Deals ordering in live results.
 
-The frontend emits:
+Version 0.5 therefore reconstructs the ranking client-side from `offers.price` and `offers.official_offer_reduction_percent`.
+
+## Ranking model
+
+The intended behavior is **discount-first, MSRP-weighted**: a 90% discount should dominate, while 90% off an $89 title should outrank 90% off a $5 title.
+
+For each in-stock offer, the script infers its reference price:
 
 ```text
-sort_field=deal_score&sort_order=desc
+referencePrice = currentPrice / (1 - discountRatio)
 ```
 
-The current API rejects that request. At the same time, valid catalogue responses still expose:
+and computes:
 
 ```text
-offers[].deal_score
-deal_score_min
-deal_score_max
+score = discountRatio² × log2(referencePrice + 1)
 ```
 
-That means the ranking signal still exists even though direct server-side sorting by it does not.
+Squaring the discount ratio makes percentage reduction the primary signal. The logarithmic reference-price term gives premium titles additional weight without allowing a very expensive low-discount listing to dominate the ranking.
 
-## Approach
+## Candidate acquisition
 
-When the user selects **Best Deals**, the userscript:
+The API no longer exposes a working server-side Best Deals sort, so the script builds a bounded candidate set from supported catalogue orders and ranks that set locally.
 
-1. intercepts only the broken `CatalogV2` request;
-2. preserves the user's filters, locale, currency, platform, and activation country;
-3. probes `deal_score_min` to find a manageable pool of high-scoring products;
-4. fetches those candidates using the supported, neutral `id` sort;
-5. reads AllKeyShop's own `offers[].deal_score` values;
-6. de-duplicates and sorts candidates locally by that score;
-7. returns a synthetic `CatalogV2` response so the existing AllKeyShop UI renders the results normally.
+It samples:
 
-No price-sort fallback is used. If reconstruction fails, the script surfaces the failure instead of presenting **Cheapest Games** as if it were **Best Deals**.
+- `price asc` across the full active price distribution using geometric page spacing;
+- the first pages of `popularity_score desc`;
+- the first pages of `rating desc`;
+- the first pages of `release_date desc`;
+- several `random` pages.
+
+This avoids the previous failure mode where using only `price asc` made the output look like **Cheapest Games**.
 
 ## Architecture
 
@@ -54,17 +60,18 @@ AllKeyShop catalogue UI
 └──────────────┬───────────────┘
                │
                ▼
-     probe deal_score_min
+  supported catalogue sampling
+ price / popularity / rating /
+     release date / random
                │
                ▼
- fetch high-score candidates
-      with sort_field=id
+ offer price + official discount
                │
                ▼
- read offers[].deal_score
+ infer reference price
                │
                ▼
- de-duplicate + local sort
+ discount-first local ranking
                │
                ▼
  synthetic CatalogV2 response
@@ -75,15 +82,16 @@ AllKeyShop catalogue UI
 
 ## Engineering characteristics
 
-- **Narrow interception:** only the AllKeyShop `CatalogV2` request with `sort_field=deal_score` is handled.
-- **Native ranking signal:** the script uses AllKeyShop's own deal scores rather than inventing a replacement formula.
-- **Filter preservation:** candidate requests retain the catalogue's active query parameters.
-- **Neutral candidate ordering:** candidates are acquired with `sort_field=id`, avoiding the price bias that would result from using `price asc`.
-- **Bounded requests:** threshold probing and page/concurrency limits prevent an unbounded crawl of the full catalogue.
-- **No deceptive fallback:** errors remain visible instead of silently degrading to an unrelated sort.
-- **Idempotent installation:** the wrapper marks the patched `fetch` function to avoid stacking interceptors.
+- **Narrow interception:** only the broken AllKeyShop `CatalogV2` request with `sort_field=deal_score` is handled.
+- **Filter preservation:** locale, currency, platform, activation country, product type, and other active filters remain in candidate requests.
+- **No dead deal-score filters:** `deal_score_min/max` are removed from reconstructed requests.
+- **Distribution-aware sampling:** the price catalogue is sampled densely at the cheap end and progressively across the full result set.
+- **Multi-strategy candidates:** popularity, rating, release date, and random samples reduce price-order bias.
+- **Bounded concurrency:** catalogue requests are intentionally limited and batched.
+- **Five-minute cache:** paging through reconstructed results does not rebuild the candidate set on every click.
+- **No deceptive fallback:** a reconstruction failure remains visible instead of silently returning Cheapest Games.
 - **Zero runtime dependencies:** the installable userscript is a single generated file.
-- **Tested pure logic:** request matching, candidate construction, score extraction, de-duplication, and ordering are covered by Node tests.
+- **Tested pure logic:** request matching, candidate construction, scoring, sampling, de-duplication, and ordering are covered by Node tests.
 
 ## Installation
 
@@ -94,6 +102,18 @@ AllKeyShop catalogue UI
 5. Select **Product type → Games**, then **Sort by → Best Deals**.
 
 The script runs at `document-start` so the interceptor is installed before the catalogue application makes its request.
+
+## Verification
+
+Open DevTools before selecting **Best Deals**. Version 0.5 logs the sampling pass and prints the top reconstructed deals:
+
+```text
+[AKS Best Deals Fix] intercepted broken Best Deals request
+[AKS Best Deals Fix] sampling ... catalogue pages across ... active pages
+[AKS Best Deals Fix] returning reconstructed page 1 (...)
+```
+
+A `console.table` shows each top candidate's discount, current price, inferred reference price, and local score.
 
 ## Development
 
@@ -121,24 +141,11 @@ This builds the root-level installable userscript and runs the test suite.
 └── .github/workflows/ci.yml
 ```
 
-## Verification
-
-With DevTools open, selecting **Best Deals** should produce console output similar to:
-
-```text
-[AKS Best Deals Fix] intercepted broken Best Deals request
-[AKS Best Deals Fix] probe 1/7 score >= 0.5000 → ... products
-[AKS Best Deals Fix] selected threshold: ...
-[AKS Best Deals Fix] returning page 1 24 items from ... locally ranked candidates
-```
-
-The script also prints the top candidates and their AllKeyShop deal scores with `console.table`.
-
 ## Limitations
 
-The implementation depends on two behaviors that are currently exposed by AllKeyShop's catalogue API: `deal_score_min/max` filtering and `offers[].deal_score` in valid responses. If either contract changes, the reconstruction strategy will need to be adapted.
+This is a reconstruction, not access to AllKeyShop's retired server-side ranking implementation. The candidate pool is deliberately bounded rather than crawling the entire catalogue, so an obscure product outside the sampled pages can be missed.
 
-The candidate pool is intentionally bounded rather than crawling the entire catalogue. The threshold search is designed to concentrate requests on the highest-scoring portion of the result set.
+The score depends on `offers.official_offer_reduction_percent` representing the reduction from the site's reference/official offer. If that field's semantics change, the ranking model will need to be adjusted.
 
 ## Scope and privacy
 
@@ -147,7 +154,7 @@ The script:
 - runs only on `www.allkeyshop.com`;
 - does not transmit data to third-party services;
 - does not read or store cookies, credentials, or account data;
-- does not alter merchant redirects, checkout behavior, regional restrictions, or pricing data.
+- does not alter merchant redirects, checkout behavior, regional restrictions, or prices.
 
 This is an independent compatibility project and is not affiliated with or endorsed by AllKeyShop.
 

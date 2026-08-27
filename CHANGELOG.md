@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.0 - 2026-08-27
+
+### Changed
+
+- Replaced the ineffective native `offers[].deal_score` reconstruction with an explicit discount-first ranking based on live offer price and `official_offer_reduction_percent`.
+- Removed `deal_score_min/max` from candidate requests after live testing showed that the remaining deal-score path did not recreate the historical Best Deals ordering.
+- Candidate acquisition now samples the active price distribution geometrically and supplements it with popularity, rating, release-date, and random catalogue pages.
+- Added a five-minute per-filter ranking cache so pagination does not repeat the sampling pass.
+
+### Added
+
+- Reference-price inference from current price and official reduction percentage.
+- A documented scoring model: `discountRatio² × log2(referencePrice + 1)`.
+- Tests for reduction normalization, reference-price inference, discount/MSRP weighting, invalid-offer rejection, and geometric page sampling.
+
 ## 0.4.0 - 2026-08-27
 
 ### Changed

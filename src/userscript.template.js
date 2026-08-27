@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AllKeyShop Best Deals Fix
 // @namespace    https://www.allkeyshop.com/
-// @version      0.4.0
-// @description  Restores AllKeyShop's broken Best Deals sort using its existing deal-score data.
+// @version      0.5.0
+// @description  Reconstructs AllKeyShop's broken Best Deals ranking from live price and discount data.
 // @match        https://www.allkeyshop.com/*
 // @run-at       document-start
 // @grant        none
@@ -19,10 +19,21 @@
     return;
   }
 
-  const TARGET_POOL = 240;
-  const PROBE_ITERATIONS = 7;
-  const MAX_FETCH_PAGES = 16;
-  const FETCH_CONCURRENCY = 4;
+  const FETCH_CONCURRENCY = 6;
+  const CACHE_TTL_MS = 5 * 60 * 1000;
+  const PRICE_SAMPLE_COUNT = 36;
+
+  // Supported server-side sorts are used only to gather a diverse candidate
+  // set. Final ordering is always computed locally from discount + reference
+  // price. Sequential page counts are intentionally bounded.
+  const SECONDARY_STRATEGIES = [
+    { sortField: 'popularity_score', sortOrder: 'desc', pages: 12 },
+    { sortField: 'rating', sortOrder: 'desc', pages: 8 },
+    { sortField: 'release_date', sortOrder: 'desc', pages: 8 },
+    { sortField: 'random', sortOrder: 'desc', pages: 12 },
+  ];
+
+  const rankingCache = new Map();
 
   /*__CATALOGUE_HELPERS__*/
 
@@ -34,22 +45,28 @@
     return input instanceof Request ? input.url : String(input);
   }
 
+  function makeCacheKey(rawUrl) {
+    const url = new URL(rawUrl, location.href);
+
+    for (const key of [
+      'sort_field',
+      'sort_order',
+      'pagenum',
+      'deal_score_min',
+      'deal_score_max',
+    ]) {
+      url.searchParams.delete(key);
+    }
+
+    url.searchParams.sort();
+    return url.toString();
+  }
+
   async function requestJson(url) {
     const response = await nativeFetch.call(window, url.toString());
 
-    // The catalogue endpoint uses 404 for some empty filtered result sets.
-    // During threshold probing that means "zero matches", not a fatal error.
     if (response.status === 404) {
-      return {
-        items: [],
-        pagination: {
-          total: 0,
-          per_page: Number(url.searchParams.get('per_page')) || 24,
-          pagenum: Number(url.searchParams.get('pagenum')) || 1,
-          total_pages: 0,
-        },
-        facets: {},
-      };
+      return null;
     }
 
     if (!response.ok) {
@@ -59,119 +76,162 @@
     return response.json();
   }
 
-  async function probeThreshold(originalUrl, threshold, perPage) {
+  async function fetchTask(originalUrl, task, perPage) {
     const url = buildCandidateUrl(
       originalUrl,
-      { threshold, page: 1, perPage },
+      {
+        sortField: task.sortField,
+        sortOrder: task.sortOrder,
+        page: task.page,
+        perPage,
+      },
       location.href
     );
-    const data = await requestJson(url);
+
+    try {
+      const data = await requestJson(url);
+      return data ? { task, data } : null;
+    } catch (error) {
+      console.warn(
+        '[AKS Best Deals Fix] candidate request skipped:',
+        task,
+        error
+      );
+      return null;
+    }
+  }
+
+  async function runTasks(originalUrl, tasks, perPage) {
+    const results = [];
+
+    for (let start = 0; start < tasks.length; start += FETCH_CONCURRENCY) {
+      const batch = tasks.slice(start, start + FETCH_CONCURRENCY);
+      const resolved = await Promise.all(
+        batch.map((task) => fetchTask(originalUrl, task, perPage))
+      );
+
+      results.push(...resolved.filter(Boolean));
+    }
+
+    return results;
+  }
+
+  function buildSecondaryTasks(totalPages) {
+    const tasks = [];
+
+    const pricePages = geometricPageSample(totalPages, PRICE_SAMPLE_COUNT);
+    for (const page of pricePages) {
+      if (page === 1) continue;
+      tasks.push({ sortField: 'price', sortOrder: 'asc', page });
+    }
+
+    for (const strategy of SECONDARY_STRATEGIES) {
+      for (let page = 1; page <= strategy.pages; page++) {
+        tasks.push({
+          sortField: strategy.sortField,
+          sortOrder: strategy.sortOrder,
+          page,
+        });
+      }
+    }
+
+    return tasks;
+  }
+
+  async function buildRanking(originalUrl, perPage) {
+    // Price page 1 is a verified-valid request shape and gives us the active
+    // catalogue's page count for distribution-aware sampling.
+    const seedTask = { sortField: 'price', sortOrder: 'asc', page: 1 };
+    const seed = await fetchTask(originalUrl, seedTask, perPage);
+
+    if (!seed) {
+      throw new Error('Could not fetch a valid catalogue seed page');
+    }
+
+    const totalPages = Math.max(
+      1,
+      Number(seed.data?.pagination?.total_pages) || 1
+    );
+    const tasks = buildSecondaryTasks(totalPages);
+
+    log(
+      `sampling ${tasks.length + 1} catalogue pages`,
+      `across ${totalPages} active pages`
+    );
+
+    const rest = await runTasks(originalUrl, tasks, perPage);
+    const pages = [seed, ...rest];
+    const ranked = mergeAndRankItems(pages);
+
+    if (!ranked.length) {
+      throw new Error(
+        'No products with usable price + official discount data were found'
+      );
+    }
+
+    console.table(
+      ranked.slice(0, 20).map((item, index) => {
+        const deal = getItemBestDeal(item);
+
+        return {
+          rank: index + 1,
+          game: item?.meta?.name ?? item?.products?.[0]?.name ?? 'Unknown',
+          discount: `${deal.discountPercent.toFixed(0)}%`,
+          price: deal.currentPrice.toFixed(2),
+          referencePrice: deal.referencePrice.toFixed(2),
+          score: deal.score.toFixed(4),
+        };
+      })
+    );
 
     return {
-      threshold,
-      total: Number(data?.pagination?.total ?? 0),
-      data,
+      template: seed.data,
+      ranked,
+      sampledPages: pages.length,
+      builtAt: Date.now(),
     };
   }
 
-  async function findCandidateThreshold(originalUrl, perPage, target) {
-    let low = 0;
-    let high = 1;
+  async function getRanking(originalUrl, perPage) {
+    const key = makeCacheKey(originalUrl);
+    const cached = rankingCache.get(key);
 
-    // threshold=0 is the known-good baseline. We retain the highest threshold
-    // that still leaves enough candidates to build the requested result pool.
-    let bestEnough = await probeThreshold(originalUrl, 0, perPage);
-
-    if (bestEnough.total === 0) {
-      throw new Error(
-        'Catalogue returned zero products at deal_score_min=0'
-      );
+    if (cached && Date.now() - cached.builtAt < CACHE_TTL_MS) {
+      log('using cached Best Deals ranking');
+      return cached;
     }
 
-    for (let i = 0; i < PROBE_ITERATIONS; i++) {
-      const threshold = (low + high) / 2;
-      const result = await probeThreshold(originalUrl, threshold, perPage);
-
-      log(
-        `probe ${i + 1}/${PROBE_ITERATIONS}`,
-        `score >= ${threshold.toFixed(4)}`,
-        `→ ${result.total} products`
-      );
-
-      if (result.total >= target) {
-        bestEnough = result;
-        low = threshold;
-      } else {
-        high = threshold;
-      }
-    }
-
-    return bestEnough;
-  }
-
-  async function fetchCandidatePool(
-    originalUrl,
-    threshold,
-    total,
-    perPage
-  ) {
-    const pageCount = Math.min(
-      Math.ceil(total / perPage),
-      MAX_FETCH_PAGES
-    );
-    const pages = [];
-
-    for (let start = 1; start <= pageCount; start += FETCH_CONCURRENCY) {
-      const batch = [];
-
-      for (
-        let page = start;
-        page < Math.min(start + FETCH_CONCURRENCY, pageCount + 1);
-        page++
-      ) {
-        const url = buildCandidateUrl(
-          originalUrl,
-          { threshold, page, perPage },
-          location.href
-        );
-
-        batch.push(requestJson(url).then((data) => ({ page, data })));
-      }
-
-      pages.push(...(await Promise.all(batch)));
-    }
-
-    pages.sort((a, b) => a.page - b.page);
-    return pages;
+    const ranking = await buildRanking(originalUrl, perPage);
+    rankingCache.set(key, ranking);
+    return ranking;
   }
 
   function createSyntheticResponse(
     template,
-    items,
+    ranked,
     requestedPage,
     requestedPerPage,
-    threshold
+    sampledPages
   ) {
     const start = (requestedPage - 1) * requestedPerPage;
-    const pageItems = items.slice(start, start + requestedPerPage);
+    const pageItems = ranked.slice(start, start + requestedPerPage);
 
     const body = {
       ...template,
       items: pageItems,
       pagination: {
         ...(template?.pagination ?? {}),
-        total: items.length,
+        total: ranked.length,
         per_page: requestedPerPage,
         pagenum: requestedPage,
-        total_pages: Math.max(1, Math.ceil(items.length / requestedPerPage)),
+        total_pages: Math.max(1, Math.ceil(ranked.length / requestedPerPage)),
       },
     };
 
     log(
-      `returning page ${requestedPage}`,
-      `${pageItems.length} items`,
-      `from ${items.length} locally ranked candidates`,
-      `threshold=${threshold.toFixed(4)}`
+      `returning reconstructed page ${requestedPage}`,
+      `(${pageItems.length} items; ${ranked.length} ranked candidates;`,
+      `${sampledPages} catalogue pages sampled)`
     );
 
     return new Response(JSON.stringify(body), {
@@ -192,59 +252,16 @@
       Number(original.searchParams.get('per_page')) || 24
     );
 
-    const needed = requestedPage * requestedPerPage;
-    const targetPool = Math.min(
-      Math.max(TARGET_POOL, needed * 2),
-      MAX_FETCH_PAGES * requestedPerPage
-    );
-
     log('intercepted broken Best Deals request');
-    log(`target candidate pool: ~${targetPool}`);
 
-    const probe = await findCandidateThreshold(
-      originalUrl,
-      requestedPerPage,
-      targetPool
-    );
-
-    log(
-      'selected threshold:',
-      probe.threshold.toFixed(6),
-      `(${probe.total} matching products)`
-    );
-
-    const pages = await fetchCandidatePool(
-      originalUrl,
-      probe.threshold,
-      probe.total,
-      requestedPerPage
-    );
-
-    if (!pages.length) {
-      throw new Error('No candidate pages were returned');
-    }
-
-    const sorted = mergeAndSortItems(pages);
-
-    if (!sorted.length) {
-      throw new Error('No deal-score candidates were found');
-    }
-
-    console.table(
-      sorted.slice(0, 15).map((item, index) => ({
-        rank: index + 1,
-        game:
-          item?.meta?.name ?? item?.products?.[0]?.name ?? 'Unknown',
-        dealScore: getItemDealScore(item),
-      }))
-    );
+    const ranking = await getRanking(originalUrl, requestedPerPage);
 
     return createSyntheticResponse(
-      pages[0].data,
-      sorted,
+      ranking.template,
+      ranking.ranked,
       requestedPage,
       requestedPerPage,
-      probe.threshold
+      ranking.sampledPages
     );
   }
 
@@ -265,8 +282,6 @@
     try {
       return await rebuildBestDeals(url);
     } catch (error) {
-      // Do not masquerade as a successful Best Deals result by silently
-      // returning price-sorted products. A visible failure is diagnosable.
       console.error(
         '[AKS Best Deals Fix] Best Deals reconstruction failed:',
         error
@@ -283,5 +298,5 @@
   });
 
   window.fetch = patchedFetch;
-  log('v0.4 installed — local deal-score ranking enabled');
+  log('v0.5 installed — discount-weighted local ranking enabled');
 })();
