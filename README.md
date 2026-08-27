@@ -2,6 +2,11 @@
 
 A userscript that restores the broken **Best Deals** sort on AllKeyShop's product catalogue.
 
+[![Install on Greasy Fork](https://img.shields.io/badge/Install-Greasy%20Fork-670000?logo=tampermonkey&logoColor=white)](https://greasyfork.org/en/scripts?q=AllKeyShop%20Best%20Deals%20Fix)
+[![Support the project](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000)](https://www.buymeacoffee.com/)
+
+> **Note:** The Greasy Fork badge currently opens search results until the final script URL is available. The support badge is a temporary placeholder.
+
 ![Restored Best Deals catalogue](docs/assets/best-deals-restored.png)
 
 ## Problem
@@ -56,6 +61,12 @@ A full catalogue crawl would require thousands of requests. The script uses a bo
 All active catalogue filters are preserved, including product type, platform, activation country, locale, and currency.
 
 ## Install
+
+### Greasy Fork
+
+Use the **Install on Greasy Fork** badge above once the listing is live.
+
+### Manual install
 
 1. Install Tampermonkey or Violentmonkey.
 2. Create a new userscript.
@@ -148,6 +159,10 @@ The request failure, rejected API fields, attempted compatibility paths, and sam
 The script runs only on `www.allkeyshop.com`. It does not send data to third-party services or read account credentials, cookies, or checkout data.
 
 This project is independent and is not affiliated with AllKeyShop.
+
+## Support
+
+If the script saves you time or helps you find a good deal, you can support future maintenance through the badge at the top of the README.
 
 ## License
 
