@@ -1,57 +1,55 @@
 # Changelog
 
-All notable changes to this project are documented here.
+## 0.5.1 - 2026-08-27
+
+### Changed
+
+- Simplified source comments and project documentation.
+- Reduced default console output; detailed ranking output is now behind the `DEBUG` flag.
+- Avoided repeated deal-score calculation during candidate sorting.
+- Added a screenshot of the restored Best Deals view.
 
 ## 0.5.0 - 2026-08-27
 
 ### Changed
 
-- Replaced the ineffective native `offers[].deal_score` reconstruction with an explicit discount-first ranking based on live offer price and `official_offer_reduction_percent`.
-- Removed `deal_score_min/max` from candidate requests after live testing showed that the remaining deal-score path did not recreate the historical Best Deals ordering.
-- Candidate acquisition now samples the active price distribution geometrically and supplements it with popularity, rating, release-date, and random catalogue pages.
-- Added a five-minute per-filter ranking cache so pagination does not repeat the sampling pass.
+- Replaced the remaining `deal_score` path with local ranking based on current price and `official_offer_reduction_percent`.
+- Added geometric price-page sampling plus popularity, rating, release-date, and random samples.
+- Added a five-minute ranking cache keyed by active catalogue filters.
 
 ### Added
 
-- Reference-price inference from current price and official reduction percentage.
-- A documented scoring model: `discountRatio² × log2(referencePrice + 1)`.
-- Tests for reduction normalization, reference-price inference, discount/MSRP weighting, invalid-offer rejection, and geometric page sampling.
+- Reference-price inference from current price and discount percentage.
+- Ranking formula: `discountRatio^2 * log2(referencePrice + 1)`.
+- Tests for discount normalization, scoring, de-duplication, and geometric page sampling.
 
 ## 0.4.0 - 2026-08-27
 
 ### Changed
 
-- Replaced the unsuccessful `deal_score → list_score` compatibility mapping with client-side reconstruction using AllKeyShop's existing `offers[].deal_score` values.
-- Candidate acquisition now uses neutral `id` ordering instead of `price asc`.
-- Removed the silent Cheapest Games fallback; reconstruction errors are now surfaced explicitly.
-- Updated project architecture, tests, and documentation around the verified API behavior.
+- Replaced the `deal_score -> list_score` experiment with local ordering of `offers[].deal_score`.
+- Removed the fallback to `price asc`.
 
 ### Added
 
-- Adaptive `deal_score_min` threshold probing to keep the candidate pool bounded.
-- Local de-duplication and descending deal-score ordering.
-- Synthetic `CatalogV2` responses so AllKeyShop's existing catalogue UI can render reconstructed results.
-- Tests for request matching, filter preservation, score extraction, de-duplication, and ranking.
+- Candidate collection and synthetic `CatalogV2` responses.
+- Tests for request matching, filter preservation, and ranking behavior.
 
 ## 0.3.1 - 2026-08-27
 
 ### Changed
 
-- Refactored URL rewriting into a pure, independently testable module.
-- Added a dependency-free build step that generates the installable userscript.
-- Added idempotent patch installation and fail-open behavior.
-- Reworked project documentation around the debugging evidence, design constraints, and implementation trade-offs.
+- Moved request logic into testable source modules.
+- Added a build step for the installable userscript.
 
 ### Added
 
-- Node test suite covering rewrite scope and parameter preservation.
+- Node test suite.
 - GitHub Actions CI.
 - Technical notes and reproduction screenshots.
-- Contributor guidance.
 
 ## 0.3.0 - 2026-08-27
 
 ### Added
 
-- Initial compatibility patch for AllKeyShop catalogue `fetch` requests.
-- Experimental rewrite from obsolete `sort_field=deal_score` to `sort_field=list_score`.
+- Initial userscript and `deal_score -> list_score` compatibility experiment.

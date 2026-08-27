@@ -16,12 +16,12 @@ const helpers = helperModule.replace(/^export\s+/gm, '');
 const output = template.replace('/*__CATALOGUE_HELPERS__*/', helpers);
 
 if (output === template) {
-  throw new Error('Build placeholder was not found in userscript.template.js');
+  throw new Error('Build placeholder not found in src/userscript.template.js');
 }
 
 await writeFile(
   outputPath,
-  `// GENERATED FILE — edit src/* and run npm run build.\n${output}`,
+  `// Generated from src/. Run npm run build after source changes.\n${output}`,
   'utf8'
 );
 

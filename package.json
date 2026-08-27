@@ -1,8 +1,8 @@
 {
   "name": "allkeyshop-best-deals-fix",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
-  "description": "A userscript that reconstructs AllKeyShop's broken Best Deals ranking from live price and discount data.",
+  "description": "Userscript that restores AllKeyShop's Best Deals catalogue ranking.",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

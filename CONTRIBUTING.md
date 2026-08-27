@@ -1,19 +1,16 @@
 # Contributing
 
-Contributions should keep the patch narrowly scoped and easy to audit.
-
-## Local workflow
+Run the full check before opening a pull request:
 
 ```bash
 npm run check
 ```
 
-This rebuilds the installable userscript and runs the regression tests.
+## Guidelines
 
-## Design rules
-
-- Prefer pure request transformations over DOM scraping.
-- Do not add third-party runtime dependencies.
-- Preserve AllKeyShop request parameters unless a change is required for the compatibility fix.
-- New request-matching behavior must include tests.
-- Treat `list_score` as a compatibility mapping, not a proven semantic equivalent of historical `deal_score` behavior.
+- Keep request interception limited to the broken Best Deals catalogue request.
+- Preserve active catalogue filters in candidate requests.
+- Keep runtime dependencies at zero unless there is a strong reason to add one.
+- Add tests for changes to request matching, scoring, sampling, or ranking.
+- Update the generated root userscript with `npm run build` after source changes.
+- Keep network request counts bounded.

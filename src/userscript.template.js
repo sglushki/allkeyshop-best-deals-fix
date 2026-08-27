@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AllKeyShop Best Deals Fix
 // @namespace    https://www.allkeyshop.com/
-// @version      0.5.0
-// @description  Reconstructs AllKeyShop's broken Best Deals ranking from live price and discount data.
+// @version      0.5.1
+// @description  Restores AllKeyShop's Best Deals catalogue ranking.
 // @match        https://www.allkeyshop.com/*
 // @run-at       document-start
 // @grant        none
@@ -22,10 +22,8 @@
   const FETCH_CONCURRENCY = 6;
   const CACHE_TTL_MS = 5 * 60 * 1000;
   const PRICE_SAMPLE_COUNT = 36;
+  const DEBUG = false;
 
-  // Supported server-side sorts are used only to gather a diverse candidate
-  // set. Final ordering is always computed locally from discount + reference
-  // price. Sequential page counts are intentionally bounded.
   const SECONDARY_STRATEGIES = [
     { sortField: 'popularity_score', sortOrder: 'desc', pages: 12 },
     { sortField: 'rating', sortOrder: 'desc', pages: 8 },
@@ -37,8 +35,10 @@
 
   /*__CATALOGUE_HELPERS__*/
 
-  function log(...args) {
-    console.log('[AKS Best Deals Fix]', ...args);
+  function debug(...args) {
+    if (DEBUG) {
+      console.debug('[AKS Best Deals Fix]', ...args);
+    }
   }
 
   function requestUrl(input) {
@@ -92,11 +92,7 @@
       const data = await requestJson(url);
       return data ? { task, data } : null;
     } catch (error) {
-      console.warn(
-        '[AKS Best Deals Fix] candidate request skipped:',
-        task,
-        error
-      );
+      console.warn('[AKS Best Deals Fix] skipped candidate request', task, error);
       return null;
     }
   }
@@ -104,8 +100,8 @@
   async function runTasks(originalUrl, tasks, perPage) {
     const results = [];
 
-    for (let start = 0; start < tasks.length; start += FETCH_CONCURRENCY) {
-      const batch = tasks.slice(start, start + FETCH_CONCURRENCY);
+    for (let offset = 0; offset < tasks.length; offset += FETCH_CONCURRENCY) {
+      const batch = tasks.slice(offset, offset + FETCH_CONCURRENCY);
       const resolved = await Promise.all(
         batch.map((task) => fetchTask(originalUrl, task, perPage))
       );
@@ -116,13 +112,13 @@
     return results;
   }
 
-  function buildSecondaryTasks(totalPages) {
+  function buildSamplingTasks(totalPages) {
     const tasks = [];
 
-    const pricePages = geometricPageSample(totalPages, PRICE_SAMPLE_COUNT);
-    for (const page of pricePages) {
-      if (page === 1) continue;
-      tasks.push({ sortField: 'price', sortOrder: 'asc', page });
+    for (const page of geometricPageSample(totalPages, PRICE_SAMPLE_COUNT)) {
+      if (page !== 1) {
+        tasks.push({ sortField: 'price', sortOrder: 'asc', page });
+      }
     }
 
     for (const strategy of SECONDARY_STRATEGIES) {
@@ -139,50 +135,46 @@
   }
 
   async function buildRanking(originalUrl, perPage) {
-    // Price page 1 is a verified-valid request shape and gives us the active
-    // catalogue's page count for distribution-aware sampling.
-    const seedTask = { sortField: 'price', sortOrder: 'asc', page: 1 };
-    const seed = await fetchTask(originalUrl, seedTask, perPage);
+    const seed = await fetchTask(
+      originalUrl,
+      { sortField: 'price', sortOrder: 'asc', page: 1 },
+      perPage
+    );
 
     if (!seed) {
-      throw new Error('Could not fetch a valid catalogue seed page');
+      throw new Error('Could not fetch a catalogue seed page');
     }
 
     const totalPages = Math.max(
       1,
       Number(seed.data?.pagination?.total_pages) || 1
     );
-    const tasks = buildSecondaryTasks(totalPages);
+    const tasks = buildSamplingTasks(totalPages);
 
-    log(
-      `sampling ${tasks.length + 1} catalogue pages`,
-      `across ${totalPages} active pages`
-    );
+    debug(`sampling ${tasks.length + 1} pages from ${totalPages} active pages`);
 
-    const rest = await runTasks(originalUrl, tasks, perPage);
-    const pages = [seed, ...rest];
+    const pages = [seed, ...(await runTasks(originalUrl, tasks, perPage))];
     const ranked = mergeAndRankItems(pages);
 
     if (!ranked.length) {
-      throw new Error(
-        'No products with usable price + official discount data were found'
-      );
+      throw new Error('No discounted products were found in the candidate set');
     }
 
-    console.table(
-      ranked.slice(0, 20).map((item, index) => {
-        const deal = getItemBestDeal(item);
-
-        return {
-          rank: index + 1,
-          game: item?.meta?.name ?? item?.products?.[0]?.name ?? 'Unknown',
-          discount: `${deal.discountPercent.toFixed(0)}%`,
-          price: deal.currentPrice.toFixed(2),
-          referencePrice: deal.referencePrice.toFixed(2),
-          score: deal.score.toFixed(4),
-        };
-      })
-    );
+    if (DEBUG) {
+      console.table(
+        ranked.slice(0, 20).map((item, index) => {
+          const deal = getItemBestDeal(item);
+          return {
+            rank: index + 1,
+            game: item?.meta?.name ?? item?.products?.[0]?.name ?? 'Unknown',
+            discount: `${deal.discountPercent.toFixed(0)}%`,
+            price: deal.currentPrice.toFixed(2),
+            referencePrice: deal.referencePrice.toFixed(2),
+            score: deal.score.toFixed(4),
+          };
+        })
+      );
+    }
 
     return {
       template: seed.data,
@@ -197,7 +189,7 @@
     const cached = rankingCache.get(key);
 
     if (cached && Date.now() - cached.builtAt < CACHE_TTL_MS) {
-      log('using cached Best Deals ranking');
+      debug('using cached ranking');
       return cached;
     }
 
@@ -210,15 +202,14 @@
     template,
     ranked,
     requestedPage,
-    requestedPerPage,
-    sampledPages
+    requestedPerPage
   ) {
     const start = (requestedPage - 1) * requestedPerPage;
-    const pageItems = ranked.slice(start, start + requestedPerPage);
+    const items = ranked.slice(start, start + requestedPerPage);
 
     const body = {
       ...template,
-      items: pageItems,
+      items,
       pagination: {
         ...(template?.pagination ?? {}),
         total: ranked.length,
@@ -227,12 +218,6 @@
         total_pages: Math.max(1, Math.ceil(ranked.length / requestedPerPage)),
       },
     };
-
-    log(
-      `returning reconstructed page ${requestedPage}`,
-      `(${pageItems.length} items; ${ranked.length} ranked candidates;`,
-      `${sampledPages} catalogue pages sampled)`
-    );
 
     return new Response(JSON.stringify(body), {
       status: 200,
@@ -252,40 +237,32 @@
       Number(original.searchParams.get('per_page')) || 24
     );
 
-    log('intercepted broken Best Deals request');
-
     const ranking = await getRanking(originalUrl, requestedPerPage);
+    debug(`ranked ${ranking.ranked.length} products from ${ranking.sampledPages} pages`);
 
     return createSyntheticResponse(
       ranking.template,
       ranking.ranked,
       requestedPage,
-      requestedPerPage,
-      ranking.sampledPages
+      requestedPerPage
     );
   }
 
   async function patchedFetch(input, init) {
     const url = requestUrl(input);
 
-    let matches = false;
     try {
-      matches = isBestDealsRequest(url, location.href);
+      if (!isBestDealsRequest(url, location.href)) {
+        return Reflect.apply(nativeFetch, this, arguments);
+      }
     } catch {
-      return Reflect.apply(nativeFetch, this, arguments);
-    }
-
-    if (!matches) {
       return Reflect.apply(nativeFetch, this, arguments);
     }
 
     try {
       return await rebuildBestDeals(url);
     } catch (error) {
-      console.error(
-        '[AKS Best Deals Fix] Best Deals reconstruction failed:',
-        error
-      );
+      console.error('[AKS Best Deals Fix] ranking failed', error);
       throw error;
     }
   }
@@ -298,5 +275,4 @@
   });
 
   window.fetch = patchedFetch;
-  log('v0.5 installed — discount-weighted local ranking enabled');
 })();

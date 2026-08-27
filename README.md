@@ -1,119 +1,100 @@
 # AllKeyShop Best Deals Fix
 
-A browser userscript that reconstructs AllKeyShop's broken **Best Deals** catalogue view from the live price and official-discount data that the site still returns.
+A userscript that restores the broken **Best Deals** sort on AllKeyShop's product catalogue.
 
-![Broken Best Deals catalogue state](docs/assets/best-deals-broken.png)
+![Restored Best Deals catalogue](docs/assets/best-deals-restored.png)
 
-## What this project demonstrates
+## Problem
 
-This project began as a production-debugging exercise. The catalogue worked under normal sort modes, but **Best Deals** consistently returned an empty state. Network inspection isolated the failure to an API-contract regression: the frontend still requests `sort_field=deal_score`, while the current `CatalogV2` endpoint no longer accepts that field for server-side sorting.
+AllKeyShop's catalogue frontend still requests:
 
-Two server-side compatibility paths were tested and rejected:
+```text
+sort_field=deal_score&sort_order=desc
+```
 
-- `deal_score` itself returns HTTP 400 as an unsupported sort field;
-- the API-advertised `list_score` returns HTTP 404 for this catalogue request;
-- offer-level `deal_score` values are still present but do not produce a useful historical Best Deals ordering in live results.
+The current `CatalogV2` API rejects `deal_score` as a sort field, so the page falls into an empty-results state. Other sorts, including `price`, continue to work.
 
-Version 0.5 therefore reconstructs the ranking client-side from `offers.price` and `offers.official_offer_reduction_percent`.
+The API still returns the data needed to build a useful deal ranking:
 
-## Ranking model
+```text
+offers.price
+offers.stock_status
+offers.official_offer_reduction_percent
+```
 
-The intended behavior is **discount-first, MSRP-weighted**: a 90% discount should dominate, while 90% off an $89 title should outrank 90% off a $5 title.
+This userscript intercepts only the broken Best Deals request, gathers a bounded set of catalogue candidates through supported sort modes, ranks those candidates locally, and returns a `CatalogV2` response to the existing page application.
 
-For each in-stock offer, the script infers its reference price:
+## Ranking
+
+For each in-stock discounted offer:
 
 ```text
 referencePrice = currentPrice / (1 - discountRatio)
+score = discountRatio^2 * log2(referencePrice + 1)
 ```
 
-and computes:
+The discount is the main ranking signal. Reference price breaks ties in favor of larger discounts on higher-priced titles without letting price overwhelm the percentage reduction.
 
-```text
-score = discountRatio² × log2(referencePrice + 1)
-```
+Examples:
 
-Squaring the discount ratio makes percentage reduction the primary signal. The logarithmic reference-price term gives premium titles additional weight without allowing a very expensive low-discount listing to dominate the ranking.
+| Current price | Discount | Inferred reference price | Relative result |
+| ---: | ---: | ---: | --- |
+| $8.90 | 90% | $89.00 | Very high |
+| $0.50 | 90% | $5.00 | High |
+| $28.00 | 60% | $70.00 | Lower |
 
-## Candidate acquisition
+## Candidate sampling
 
-The API no longer exposes a working server-side Best Deals sort, so the script builds a bounded candidate set from supported catalogue orders and ranks that set locally.
+A full catalogue crawl would require thousands of requests. The script uses a bounded sample instead:
 
-It samples:
+- geometrically spaced pages from `price asc`
+- leading pages from `popularity_score desc`
+- leading pages from `rating desc`
+- leading pages from `release_date desc`
+- several `random` pages
 
-- `price asc` across the full active price distribution using geometric page spacing;
-- the first pages of `popularity_score desc`;
-- the first pages of `rating desc`;
-- the first pages of `release_date desc`;
-- several `random` pages.
+All active catalogue filters are preserved, including product type, platform, activation country, locale, and currency.
 
-This avoids the previous failure mode where using only `price asc` made the output look like **Cheapest Games**.
-
-## Architecture
-
-```text
-AllKeyShop catalogue UI
-        │
-        │ fetch(...sort_field=deal_score...)
-        ▼
-┌──────────────────────────────┐
-│ Best Deals interceptor       │
-└──────────────┬───────────────┘
-               │
-               ▼
-  supported catalogue sampling
- price / popularity / rating /
-     release date / random
-               │
-               ▼
- offer price + official discount
-               │
-               ▼
- infer reference price
-               │
-               ▼
- discount-first local ranking
-               │
-               ▼
- synthetic CatalogV2 response
-               │
-               ▼
-     native AllKeyShop UI
-```
-
-## Engineering characteristics
-
-- **Narrow interception:** only the broken AllKeyShop `CatalogV2` request with `sort_field=deal_score` is handled.
-- **Filter preservation:** locale, currency, platform, activation country, product type, and other active filters remain in candidate requests.
-- **No dead deal-score filters:** `deal_score_min/max` are removed from reconstructed requests.
-- **Distribution-aware sampling:** the price catalogue is sampled densely at the cheap end and progressively across the full result set.
-- **Multi-strategy candidates:** popularity, rating, release date, and random samples reduce price-order bias.
-- **Bounded concurrency:** catalogue requests are intentionally limited and batched.
-- **Five-minute cache:** paging through reconstructed results does not rebuild the candidate set on every click.
-- **No deceptive fallback:** a reconstruction failure remains visible instead of silently returning Cheapest Games.
-- **Zero runtime dependencies:** the installable userscript is a single generated file.
-- **Tested pure logic:** request matching, candidate construction, scoring, sampling, de-duplication, and ordering are covered by Node tests.
-
-## Installation
+## Install
 
 1. Install Tampermonkey or Violentmonkey.
-2. Copy `allkeyshop-best-deals-fix.user.js` into a new userscript.
-3. Save it and hard-refresh AllKeyShop.
-4. Open the product catalogue.
-5. Select **Product type → Games**, then **Sort by → Best Deals**.
+2. Create a new userscript.
+3. Paste the contents of [`allkeyshop-best-deals-fix.user.js`](allkeyshop-best-deals-fix.user.js).
+4. Save the script and reload AllKeyShop.
+5. Open the product catalogue and select **Sort by -> Best deals**.
 
-The script runs at `document-start` so the interceptor is installed before the catalogue application makes its request.
+The userscript runs at `document-start` so it can patch `fetch` before the catalogue application loads its results.
 
-## Verification
-
-Open DevTools before selecting **Best Deals**. Version 0.5 logs the sampling pass and prints the top reconstructed deals:
+## Implementation
 
 ```text
-[AKS Best Deals Fix] intercepted broken Best Deals request
-[AKS Best Deals Fix] sampling ... catalogue pages across ... active pages
-[AKS Best Deals Fix] returning reconstructed page 1 (...)
+Best Deals request
+        |
+        v
+fetch interceptor
+        |
+        v
+supported catalogue queries
+        |
+        v
+candidate de-duplication
+        |
+        v
+local deal scoring
+        |
+        v
+synthetic CatalogV2 response
+        |
+        v
+AllKeyShop catalogue UI
 ```
 
-A `console.table` shows each top candidate's discount, current price, inferred reference price, and local score.
+The implementation is split into two parts:
+
+- `src/catalogue-ranking.mjs`: request matching, candidate URL construction, scoring, sampling, de-duplication, and ranking
+- `src/userscript.template.js`: network interception, bounded fetching, caching, and response construction
+
+The root userscript is generated from those source files.
 
 ## Development
 
@@ -123,7 +104,9 @@ Requires Node.js 20 or newer.
 npm run check
 ```
 
-This builds the root-level installable userscript and runs the test suite.
+`npm run check` rebuilds the userscript and runs the Node test suite.
+
+Repository layout:
 
 ```text
 .
@@ -131,32 +114,40 @@ This builds the root-level installable userscript and runs the test suite.
 ├── src/
 │   ├── catalogue-ranking.mjs
 │   └── userscript.template.js
-├── scripts/
-│   └── build.mjs
 ├── test/
 │   └── catalogue-ranking.test.mjs
+├── scripts/
+│   └── build.mjs
 ├── docs/
 │   ├── technical-notes.md
 │   └── assets/
 └── .github/workflows/ci.yml
 ```
 
+## Design constraints
+
+- Only the broken `CatalogV2` Best Deals request is intercepted.
+- Existing catalogue filters are retained.
+- Runtime code has no third-party dependencies.
+- Candidate requests use bounded concurrency.
+- Rankings are cached for five minutes per filter state.
+- Failed reconstruction is surfaced as an error instead of being replaced with another sort mode.
+
 ## Limitations
 
-This is a reconstruction, not access to AllKeyShop's retired server-side ranking implementation. The candidate pool is deliberately bounded rather than crawling the entire catalogue, so an obscure product outside the sampled pages can be missed.
+The original server-side ranking is no longer available through the current API. This project reconstructs a ranking from fields still returned by the site.
 
-The score depends on `offers.official_offer_reduction_percent` representing the reduction from the site's reference/official offer. If that field's semantics change, the ranking model will need to be adjusted.
+Candidate collection is sampled rather than exhaustive. A deal outside the sampled pages can be missed. The result quality depends on the accuracy of `official_offer_reduction_percent` and the current offer price returned by AllKeyShop.
 
-## Scope and privacy
+## Debugging notes
 
-The script:
+The request failure, rejected API fields, attempted compatibility paths, and sampling rationale are documented in [`docs/technical-notes.md`](docs/technical-notes.md).
 
-- runs only on `www.allkeyshop.com`;
-- does not transmit data to third-party services;
-- does not read or store cookies, credentials, or account data;
-- does not alter merchant redirects, checkout behavior, regional restrictions, or prices.
+## Privacy
 
-This is an independent compatibility project and is not affiliated with or endorsed by AllKeyShop.
+The script runs only on `www.allkeyshop.com`. It does not send data to third-party services or read account credentials, cookies, or checkout data.
+
+This project is independent and is not affiliated with AllKeyShop.
 
 ## License
 

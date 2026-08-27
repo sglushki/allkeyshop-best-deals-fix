@@ -1,36 +1,28 @@
 # Technical notes
 
-## Incident summary
+## Failure
 
-AllKeyShop's catalogue continued to work under normal sorts such as **Cheapest Games**, while **Best Deals** returned an empty state under otherwise identical filters.
-
-### Working request
+The catalogue works with supported sort fields such as:
 
 ```text
 sort_field=price
 sort_order=asc
 ```
 
-Response: HTTP 200.
-
-### Broken request
+The Best Deals control sends:
 
 ```text
 sort_field=deal_score
 sort_order=desc
 ```
 
-Response: HTTP 400. The API reports `deal_score` as an unsupported server-side sort field.
+The API responds with HTTP 400 and reports that `deal_score` is not a supported sort field.
 
-The validation response advertised `list_score` as supported, but live testing showed `sort_field=list_score` returns HTTP 404 for the same Games catalogue request, both with and without the obsolete deal-score filters.
+The validation response lists `list_score` as a supported field, but the same catalogue request with `sort_field=list_score` returns HTTP 404. Removing `deal_score_min` and `deal_score_max` does not change that result.
 
-## Why version 0.4 was insufficient
+## Data used by the replacement ranking
 
-Version 0.4 attempted to retain AllKeyShop's native ranking signal by reading `offers[].deal_score` and using `deal_score_min/max` to concentrate the candidate set. Live results showed that this did not recreate Best Deals: the output followed neutral catalogue/ID ordering rather than deal quality, indicating that the remaining deal-score values/filter behavior are not sufficient to reproduce the historical sort.
-
-## Version 0.5 ranking model
-
-Valid responses still expose:
+Valid catalogue responses include:
 
 ```text
 offers.price
@@ -38,54 +30,37 @@ offers.stock_status
 offers.official_offer_reduction_percent
 ```
 
-The local scorer therefore reconstructs the behavior from those fields.
-
-For an offer with current price `P` and reduction `D` in the range `(0, 1)`:
+For a current price `P` and discount ratio `D`:
 
 ```text
 referencePrice = P / (1 - D)
-score = D² × log2(referencePrice + 1)
+score = D^2 * log2(referencePrice + 1)
 ```
 
-The squared discount term makes percentage reduction the dominant factor. The logarithmic reference-price term differentiates, for example, a 90% reduction on a premium title from the same reduction on a $5 title without allowing MSRP alone to overwhelm the ranking.
+Free offers, invalid discounts, and explicitly out-of-stock offers are excluded.
 
-Free, undiscounted, invalid, and explicitly out-of-stock offers are excluded.
+## Sampling
 
-## Candidate sampling
+The active Games catalogue contains thousands of pages, so the userscript does not crawl the complete result set.
 
-A complete crawl of the active Games catalogue would require thousands of pages. Version 0.5 uses bounded, multi-strategy sampling instead.
+Price-sorted pages are sampled with geometric spacing. The first twelve pages are always included, followed by progressively wider page intervals through the end of the active result set. Additional leading pages are collected from popularity, rating, release date, and random sorts.
 
-### Price-distribution sample
+Candidate requests keep the user's active filters and remove the non-working `deal_score_min` and `deal_score_max` parameters.
 
-The first twelve `price asc` pages are always included. Additional pages are chosen with geometric spacing from page 1 to the active catalogue's final page. This gives dense coverage to low prices while still sampling medium and high current-price regions.
+## Response handling
 
-### Secondary samples
+Candidates are de-duplicated using `_merge_key` when available. Each item's strongest in-stock offer is scored. The ranked slice for the requested page is placed into a JSON response matching the existing `CatalogV2` shape.
 
-The script also collects bounded leading pages from:
+The site continues to render its own catalogue cards, merchant names, links, filters, and pagination controls.
 
-```text
-popularity_score desc
-rating desc
-release_date desc
-random
-```
+## Cache
 
-These samples reduce the chance that a strong deal is missed simply because its current price places it far from the beginning of the price-sorted catalogue.
-
-All candidate requests preserve the user's active filters and remove the obsolete `deal_score_min/max` parameters.
-
-## Synthetic response
-
-Candidate items are de-duplicated by API merge key when available. Each item's strongest in-stock offer is scored, items are sorted locally, and the requested slice is returned as a synthetic JSON `Response` in the normal `CatalogV2` shape. The native catalogue UI therefore continues to render the cards, pagination controls, merchant information, and links.
-
-## Cache and request bounds
-
-The reconstructed ranking is cached for five minutes per filter state. Candidate requests are executed with bounded concurrency. Changing a catalogue filter creates a different cache key and therefore a fresh ranking.
+A ranking is cached for five minutes using the active filter state as the key. Page number and sort parameters are excluded from the key so moving between reconstructed pages reuses the same candidate set.
 
 ## Failure behavior
 
-The script deliberately does not fall back to `price asc`. Returning an unrelated sort under the **Best Deals** label makes a failure look successful and obscures debugging evidence.
+The script does not substitute `price asc` or another unrelated sort if reconstruction fails. Errors remain visible in the console and the request rejects.
 
-## Non-goals
+## Scope
 
-The project does not bypass authentication, merchant redirects, regional controls, purchase restrictions, or pricing logic. It reconstructs one broken catalogue ordering from public values already returned to the browser.
+The userscript changes catalogue ordering only. It does not modify authentication, merchant redirects, region checks, prices, or checkout behavior.
