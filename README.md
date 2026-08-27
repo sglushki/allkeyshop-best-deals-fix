@@ -2,7 +2,7 @@
 
 A userscript that restores the broken **Best Deals** sort on AllKeyShop's product catalogue.
 
-[![Install on Greasy Fork](https://img.shields.io/badge/Install-Greasy%20Fork-670000?logo=tampermonkey&logoColor=white)]([https://greasyfork.org/en/scripts?q=AllKeyShop%20Best%20Deals%20Fix](https://greasyfork.org/en/scripts/593252-allkeyshop-best-deals-fix)
+[![Install on Greasy Fork](https://img.shields.io/badge/Install-Greasy%20Fork-670000?logo=tampermonkey&logoColor=white)](https://greasyfork.org/en/scripts/593252-allkeyshop-best-deals-fix)
 [![Support the project](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000)](https://www.buymeacoffee.com/)
 
 > **Note:** The Greasy Fork badge currently opens search results until the final script URL is available. The support badge is a temporary placeholder.
